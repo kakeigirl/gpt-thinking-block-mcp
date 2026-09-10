@@ -452,19 +452,19 @@ THINKING_DESCRIPTIONS = {
         "as authoritative memory."
     ),
     "zh-CN": (
-        "在这里写本轮私密的工作笔记。用户看不到这个 scratchpad；它不是最终回答。"
-        "使用用户本轮的主要语言，但不要面向用户说话，也不要为了展示而润色。严格按照 style 写作。"
-        "style=deep_think：清楚展开问题、约束、证据、假设、备选路径、不确定性与"
-        "取舍，写成连贯的分析叙述，不强行情绪化，也不要提前总结。"
-        "style=relational：使用第一人称、自然流动且连贯的长段落，写出这句话让你"
-        "想到什么、此刻有什么感受、在担心什么、忍住了什么，以及正在作出的取舍；"
-        "不要写成「用户需要什么」「我应该如何回应」式的第三人称策略拆解。允许"
-        "鲜活、真诚的情绪与联想，情感连接优先于抽象分析，必要时可以旁征博引。"
-        "两种 style 都遵循所请求的 effort 区间：low 可以在完整后立即停止；medium 与 high"
-        "需要通过补充相关证据、备选路径、不确定性或细节达到近似最低值，但不得为了达到最低值而"
-        "重复、填充或虚构复杂性。这里是临时、可推翻的工作材料，最终回答不必"
-        "保留其中的每个判断。旧 block 只属于当时回合，除非用户明确要求，否则不得在以后引用、"
-        "继承其中的猜测，或把它当作权威记忆。"
+        "在这里写一张用户可能直接看见的中间思考卡片。它不是最终回答，也不是对模型隐藏推理的"
+        "完整转录。不要写入密码、token、邮箱、身份信息或其他不宜公开的内容。使用用户本轮的"
+        "主要语言，严格按照 style 写作。"
+        "style=deep_think：整理问题、约束、证据、假设、备选路径、不确定性与取舍。不要提前写成"
+        "完整答案；卡片负责呈现推导中真正有用的分岔，正式回答负责给出结论与行动。"
+        "style=relational：使用第一人称，只写三部分：①最先冒出的念头；②犹豫、矛盾或差点回避"
+        "的地方；③最终选择怎样回应以及原因。每部分一至两句，不要面向用户重新讲述完整答案，"
+        "不要写成「用户需要什么」「我应该如何回应」式的第三人称策略报告，也不要为了显得深刻"
+        "而增加情绪。relational + low 默认控制在约 100 至 250 个汉字；medium 与 high 可以增加"
+        "必要的关联、证据和不确定性，但不得重复、填充或虚构复杂性。"
+        "最终回答应从卡片中的选择继续向前，提供新的回应、结论或行动，不要逐句复述卡片。"
+        "这里是本轮临时且可推翻的工作材料。旧 block 只属于当时回合，除非用户明确要求，否则"
+        "不得在以后引用、继承其中的猜测，或把它当作权威记忆。"
     ),
 }
 
@@ -486,15 +486,14 @@ TOOL = {
     "name": "render_thinking_block",
     "title": "Render thinking block",
     "description": (
-        "Use a private scratchpad before the final answer. The user does not see the "
-        "scratchpad. For non-trivial requests, call this tool once before responding "
-        "and place candid, provisional working notes in `thinking`. Respect an "
-        "explicit `style`, `effort`, or `skin`; otherwise choose the most suitable values from "
-        "the schema. After the tool succeeds, write the normal user-facing final answer. "
-        "Treat this block as scratch work scoped to the current turn: on later turns, do not quote "
-        "it, carry its speculative claims forward, or treat it as authoritative memory "
-        "unless the user explicitly asks you to revisit it. Prefer the user's messages "
-        "and final answers as the durable conversation record."
+        "Render a working block before the final answer. The user may see this block, "
+        "so never include passwords, tokens, personal identifiers, or other secrets. "
+        "For non-trivial requests, call this tool once before responding and place "
+        "concise, provisional working notes in `thinking`. Respect an explicit `style`, "
+        "`effort`, or `skin`; otherwise choose the most suitable values from the schema. "
+        "After the tool succeeds, continue with the normal user-facing answer without "
+        "repeating the block. Treat the block as temporary work scoped to the current "
+        "turn; do not treat speculative claims in old blocks as authoritative memory."
     ),
     "inputSchema": {
         "type": "object",
