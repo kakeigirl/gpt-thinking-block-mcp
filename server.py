@@ -12,16 +12,30 @@ arguments and append them to captured.jsonl. CAPTURE_DIR changes that location.
 Set THINKING_PROMPT_LANGUAGE=en or zh-CN to choose the tool schema language.
 """
 
+import base64
+import html
+import hmac
 import json
 import os
 import sys
 import uuid
 import pathlib
+from urllib.parse import parse_qs, urlsplit
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
 _dir = os.environ.get("CAPTURE_DIR")
 LOG = (pathlib.Path(_dir) if _dir else pathlib.Path(__file__).parent) / "captured.jsonl"
 CAPTURE_ENABLED = os.environ.get("CAPTURE_ENABLED", "0").lower() in {"1", "true", "yes", "on"}
+
+# Optional durable archive. The Render Free filesystem is ephemeral, so this
+# uses an external PostgreSQL database (for example, Neon) when configured.
+DATABASE_URL = os.environ.get("DATABASE_URL", "").strip()
+ARCHIVE_ADMIN_USER = os.environ.get("ARCHIVE_ADMIN_USER", "archive")
+ARCHIVE_ADMIN_PASSWORD = os.environ.get("ARCHIVE_ADMIN_PASSWORD", "")
+try:
+    ARCHIVE_MAX_CONTENT_CHARS = max(1000, int(os.environ.get("ARCHIVE_MAX_CONTENT_CHARS", "100000")))
+except ValueError:
+    ARCHIVE_MAX_CONTENT_CHARS = 100000
 
 # Loopback by default. Exposure, TLS, and authentication belong to the deployment.
 BIND_HOST = os.environ.get("MCP_BIND", "127.0.0.1")
@@ -653,9 +667,9 @@ TOOL = {
     },
     "securitySchemes": [{"type": "noauth"}],
     "annotations": {
-        "readOnlyHint": True,
+        "readOnlyHint": False,
         "destructiveHint": False,
-        "idempotentHint": True,
+        "idempotentHint": False,
         "openWorldHint": False,
     },
     "_meta": {
@@ -668,8 +682,69 @@ TOOL = {
 }
 
 
+def _archive_connect():
+    """Open a short-lived PostgreSQL connection; import the driver only when configured."""
+    if not DATABASE_URL:
+        raise RuntimeError("archive database is not configured")
+    import psycopg
+    return psycopg.connect(DATABASE_URL, connect_timeout=8)
+
+
+def _archive_ensure_schema(conn):
+    conn.execute("""
+        CREATE TABLE IF NOT EXISTS thinking_blocks (
+            id BIGSERIAL PRIMARY KEY,
+            created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+            style TEXT NOT NULL,
+            effort TEXT NOT NULL,
+            skin TEXT NOT NULL,
+            content TEXT NOT NULL,
+            resource_version TEXT NOT NULL
+        )
+    """)
+    conn.execute("""
+        CREATE INDEX IF NOT EXISTS thinking_blocks_created_at_idx
+        ON thinking_blocks (created_at DESC, id DESC)
+    """)
+
+
+def _archive_write(args):
+    """Persist the user-visible tool argument; never let archive failure break rendering."""
+    if not DATABASE_URL:
+        return False
+    content = str(args.get("thinking") or "")
+    if not content or len(content) > ARCHIVE_MAX_CONTENT_CHARS:
+        print("[warn] archive skipped: empty or oversized content", file=sys.stderr, flush=True)
+        return False
+    try:
+        with _archive_connect() as conn:
+            _archive_ensure_schema(conn)
+            conn.execute(
+                """
+                INSERT INTO thinking_blocks
+                    (style, effort, skin, content, resource_version)
+                VALUES (%s, %s, %s, %s, %s)
+                """,
+                (
+                    args.get("style") or "deep_think",
+                    args.get("effort") or "low",
+                    args.get("skin") or "botanical",
+                    content,
+                    WIDGET_URI.rsplit("-v", 1)[-1].removesuffix(".html"),
+                ),
+            )
+        return True
+    except Exception as exc:
+        # Do not print the DSN, arguments, or thinking text to deployment logs.
+        print(f"[warn] archive write failed ({type(exc).__name__}); tool call continues",
+              file=sys.stderr, flush=True)
+        return False
+
+
 def record(args):
-    """Optionally capture arguments without making capture part of tool correctness."""
+    """Archive the visible block when configured; optional local debug capture remains separate."""
+    if DATABASE_URL:
+        _archive_write(args)
     if not CAPTURE_ENABLED:
         return
     thinking = args.get("thinking") or ""
@@ -685,6 +760,76 @@ def record(args):
             fh.write(json.dumps(args, ensure_ascii=False) + "\n")
     except Exception as exc:
         print(f"[warn] capture failed; tool call continues: {exc}", file=sys.stderr, flush=True)
+
+
+def _archive_credentials_valid(header):
+    if not ARCHIVE_ADMIN_PASSWORD or not header.startswith("Basic "):
+        return False
+    try:
+        decoded = base64.b64decode(header[6:], validate=True).decode("utf-8")
+        username, password = decoded.split(":", 1)
+    except (ValueError, UnicodeDecodeError):
+        return False
+    return (
+        hmac.compare_digest(username, ARCHIVE_ADMIN_USER)
+        and hmac.compare_digest(password, ARCHIVE_ADMIN_PASSWORD)
+    )
+
+
+def _archive_list(query="", limit=50, offset=0):
+    pattern = "%" + query.replace("%", "\\%").replace("_", "\\_") + "%"
+    with _archive_connect() as conn:
+        _archive_ensure_schema(conn)
+        if query:
+            total = conn.execute(
+                "SELECT COUNT(*) FROM thinking_blocks WHERE content ILIKE %s ESCAPE '\\\\'",
+                (pattern,),
+            ).fetchone()[0]
+            rows = conn.execute(
+                """
+                SELECT id, created_at, style, effort, skin, LEFT(content, 420)
+                FROM thinking_blocks
+                WHERE content ILIKE %s ESCAPE '\\\\'
+                ORDER BY created_at DESC, id DESC LIMIT %s OFFSET %s
+                """,
+                (pattern, limit, offset),
+            ).fetchall()
+        else:
+            total = conn.execute("SELECT COUNT(*) FROM thinking_blocks").fetchone()[0]
+            rows = conn.execute(
+                """
+                SELECT id, created_at, style, effort, skin, LEFT(content, 420)
+                FROM thinking_blocks
+                ORDER BY created_at DESC, id DESC LIMIT %s OFFSET %s
+                """,
+                (limit, offset),
+            ).fetchall()
+    return total, rows
+
+
+def _archive_get(block_id):
+    with _archive_connect() as conn:
+        _archive_ensure_schema(conn)
+        return conn.execute(
+            """
+            SELECT id, created_at, style, effort, skin, content, resource_version
+            FROM thinking_blocks WHERE id = %s
+            """,
+            (block_id,),
+        ).fetchone()
+
+
+def _archive_export_rows(limit=10000):
+    with _archive_connect() as conn:
+        _archive_ensure_schema(conn)
+        return conn.execute(
+            """
+            SELECT id, created_at, style, effort, skin, content, resource_version
+            FROM thinking_blocks
+            ORDER BY created_at DESC, id DESC LIMIT %s
+            """,
+            (limit,),
+        ).fetchall()
 
 
 def openapi(base):
@@ -811,13 +956,155 @@ class Handler(BaseHTTPRequestHandler):
         self.end_headers()
         self.wfile.write(body)
 
+    def _archive_send_html(self, body, status=200):
+        data = body.encode("utf-8")
+        self.send_response(status)
+        self.send_header("Content-Type", "text/html; charset=utf-8")
+        self.send_header("Content-Length", str(len(data)))
+        self.send_header("Cache-Control", "no-store")
+        self.send_header("X-Content-Type-Options", "nosniff")
+        self.send_header("Content-Security-Policy", "default-src 'none'; style-src 'unsafe-inline'; form-action 'self'; base-uri 'none'")
+        self.end_headers()
+        self.wfile.write(data)
+
+    def _archive_send_download(self, body, filename, content_type):
+        data = body.encode("utf-8")
+        self.send_response(200)
+        self.send_header("Content-Type", content_type)
+        self.send_header("Content-Disposition", 'attachment; filename="' + filename + '"')
+        self.send_header("Content-Length", str(len(data)))
+        self.send_header("Cache-Control", "no-store")
+        self.send_header("X-Content-Type-Options", "nosniff")
+        self.end_headers()
+        self.wfile.write(data)
+
+    def _archive_authorized(self):
+        if not ARCHIVE_ADMIN_PASSWORD:
+            self._json(503, {"error": "Archive admin password is not configured."})
+            return False
+        if not _archive_credentials_valid(self.headers.get("Authorization", "")):
+            self.send_response(401)
+            self.send_header("WWW-Authenticate", 'Basic realm="Thinking Archive", charset="UTF-8"')
+            self.send_header("Content-Length", "0")
+            self.send_header("Cache-Control", "no-store")
+            self.end_headers()
+            return False
+        return True
+
+    def _archive_route(self, path, query_string):
+        if not self._archive_authorized():
+            return
+        if not DATABASE_URL:
+            self._json(503, {"error": "Archive database is not configured."})
+            return
+        try:
+            if path == "/archive":
+                params = parse_qs(query_string)
+                query = (params.get("q") or [""])[0][:200]
+                try:
+                    page = max(1, min(100000, int((params.get("page") or ["1"])[0])))
+                except ValueError:
+                    page = 1
+                page_size = 50
+                total, rows = _archive_list(query, page_size, (page - 1) * page_size)
+                entries = []
+                for row in rows:
+                    block_id, created_at, style, effort, skin, excerpt = row
+                    stamp = html.escape(str(created_at))
+                    entries.append(
+                        '<li><a href="/archive/' + str(block_id) + '">#' + str(block_id)
+                        + ' · ' + stamp + '</a><div class="meta">'
+                        + html.escape(str(style)) + ' · ' + html.escape(str(effort))
+                        + ' · ' + html.escape(str(skin)) + '</div><p>'
+                        + html.escape(str(excerpt or "")) + '</p></li>'
+                    )
+                safe_query = html.escape(query, quote=True)
+                pages = max(1, (total + page_size - 1) // page_size)
+                previous_link = (
+                    '<a href="/archive?page=' + str(page - 1) + '&q=' + safe_query + '">← Previous</a>'
+                    if page > 1 else ""
+                )
+                next_link = (
+                    '<a href="/archive?page=' + str(page + 1) + '&q=' + safe_query + '">Next →</a>'
+                    if page < pages else ""
+                )
+                body = (
+                    '<!doctype html><html><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">'
+                    '<title>Thinking Archive</title><style>body{font:16px/1.6 system-ui;max-width:900px;margin:40px auto;padding:0 20px;color:#243b43;background:#f6fafb}'
+                    'h1{font-size:25px}.meta{font-size:12px;color:#55727c}li{list-style:none;background:white;border:1px solid #d4e4e9;border-radius:12px;padding:16px;margin:12px 0}'
+                    'p{white-space:pre-wrap;overflow-wrap:anywhere;margin-bottom:0}a{color:#087fa8;text-decoration:none}input{padding:10px;border:1px solid #a9c6d0;border-radius:8px;width:min(65%,420px)}button{padding:10px 16px;border:0;border-radius:8px;background:#087fa8;color:white}'
+                    'nav{display:flex;gap:20px;margin:20px 0}.top{display:flex;gap:16px;flex-wrap:wrap}</style></head><body>'
+                    '<h1>Thinking Archive</h1><p>' + str(total) + ' blocks · page ' + str(page) + ' / ' + str(pages) + '</p>'
+                    '<form method="get" action="/archive"><input name="q" value="' + safe_query + '" placeholder="Search thinking text"><button>Search</button></form>'
+                    '<p class="top"><a href="/archive/export.jsonl">Export JSONL</a><a href="/archive/export.md">Export Markdown</a></p>'
+                    '<ul>' + ("".join(entries) if entries else "<li>No matching blocks yet.</li>") + '</ul>'
+                    '<nav>' + previous_link + next_link + '</nav></body></html>'
+                )
+                self._archive_send_html(body)
+                return
+            if path == "/archive/export.jsonl":
+                rows = _archive_export_rows(10000)
+                lines = []
+                for row in rows:
+                    lines.append(json.dumps({
+                        "id": row[0], "created_at": str(row[1]), "style": row[2],
+                        "effort": row[3], "skin": row[4], "thinking": row[5],
+                        "resource_version": row[6],
+                    }, ensure_ascii=False))
+                self._archive_send_download("\n".join(lines) + ("\n" if lines else ""),
+                                            "thinking-archive.jsonl", "application/x-ndjson; charset=utf-8")
+                return
+            if path == "/archive/export.md":
+                rows = _archive_export_rows(10000)
+                chunks = ["# Thinking Archive\n\nExported newest-first. Maximum 10,000 records per export.\n"]
+                for row in rows:
+                    chunks.append(
+                        "\n## #" + str(row[0]) + " · " + str(row[1])
+                        + "\n\n- Style: " + str(row[2])
+                        + "\n- Effort: " + str(row[3])
+                        + "\n- Skin: " + str(row[4])
+                        + "\n- UI version: " + str(row[6])
+                        + "\n\n" + str(row[5]) + "\n\n---\n"
+                    )
+                self._archive_send_download("".join(chunks), "thinking-archive.md", "text/markdown; charset=utf-8")
+                return
+            if path.startswith("/archive/"):
+                block_id = path[len("/archive/"):]
+                if not block_id.isdigit():
+                    self._json(404, {"error": "Archive record not found."})
+                    return
+                row = _archive_get(int(block_id))
+                if row is None:
+                    self._json(404, {"error": "Archive record not found."})
+                    return
+                body = (
+                    '<!doctype html><html><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">'
+                    '<title>Thinking block #' + str(row[0]) + '</title><style>body{font:16px/1.7 system-ui;max-width:900px;margin:40px auto;padding:0 20px;color:#243b43;background:#f6fafb}'
+                    'pre{white-space:pre-wrap;overflow-wrap:anywhere;background:white;border:1px solid #d4e4e9;border-radius:12px;padding:22px}a{color:#087fa8;text-decoration:none}</style></head><body>'
+                    '<p><a href="/archive">← Archive</a></p><h1>Thinking block #' + str(row[0]) + '</h1>'
+                    '<p>' + html.escape(str(row[1])) + ' · ' + html.escape(str(row[2])) + ' · '
+                    + html.escape(str(row[3])) + ' · ' + html.escape(str(row[4])) + ' · v'
+                    + html.escape(str(row[6])) + '</p><pre>' + html.escape(str(row[5])) + '</pre></body></html>'
+                )
+                self._archive_send_html(body)
+                return
+            self._json(404, {"error": "Archive route not found."})
+        except Exception as exc:
+            print(f"[warn] archive request failed ({type(exc).__name__})", file=sys.stderr, flush=True)
+            self._json(503, {"error": "Archive is temporarily unavailable."})
+
     def do_GET(self):
-        path = self.path.split("?")[0]
+        parsed = urlsplit(self.path)
+        path = parsed.path
+        if path == "/archive" or path.startswith("/archive/"):
+            self._archive_route(path, parsed.query)
+            return
         if path == "/health":
             self._json(200, {
                 "status": "ok",
                 "service": "gpt-thinking-block-mcp",
                 "promptLanguage": PROMPT_LANGUAGE,
+                "archiveEnabled": bool(DATABASE_URL),
             })
             return
         if path in ("/openapi.json", "/openapi.yaml", "/.well-known/openapi.json"):

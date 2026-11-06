@@ -3,6 +3,7 @@ import io
 import pathlib
 import tempfile
 import unittest
+from unittest import mock
 
 import server
 
@@ -75,6 +76,51 @@ class ProtocolTests(unittest.TestCase):
         self.assertFalse(response["result"]["isError"])
         self.assertEqual(response["result"]["_meta"]["effort"], "high")
         self.assertEqual(response["result"]["_meta"]["skin"], "microglow")
+
+    def test_archive_write_is_optional_when_database_unconfigured(self):
+        old_url = server.DATABASE_URL
+        try:
+            server.DATABASE_URL = ""
+            with mock.patch.object(server, "_archive_connect") as connect:
+                self.assertFalse(server._archive_write({
+                    "thinking": "not persisted without a database",
+                }))
+                connect.assert_not_called()
+        finally:
+            server.DATABASE_URL = old_url
+
+    def test_archive_write_persists_visible_block(self):
+        old_url = server.DATABASE_URL
+        try:
+            server.DATABASE_URL = "postgresql://test"
+            conn = mock.MagicMock()
+            ctx = mock.MagicMock()
+            ctx.__enter__.return_value = conn
+            with mock.patch.object(server, "_archive_connect", return_value=ctx):
+                self.assertTrue(server._archive_write({
+                    "style": "relational",
+                    "effort": "medium",
+                    "skin": "microglow",
+                    "thinking": "archive me",
+                }))
+            self.assertGreaterEqual(conn.execute.call_count, 3)
+            insert_call = conn.execute.call_args_list[-1]
+            self.assertIn("INSERT INTO thinking_blocks", insert_call.args[0])
+            self.assertEqual(insert_call.args[1][:4], ("relational", "medium", "microglow", "archive me"))
+        finally:
+            server.DATABASE_URL = old_url
+
+    def test_archive_write_failure_does_not_break_tool(self):
+        old_url = server.DATABASE_URL
+        try:
+            server.DATABASE_URL = "postgresql://test"
+            with mock.patch.object(server, "_archive_connect", side_effect=RuntimeError("offline")):
+                with contextlib.redirect_stderr(io.StringIO()) as stderr:
+                    self.assertFalse(server._archive_write({"thinking": "still render"}))
+                self.assertIn("archive write failed", stderr.getvalue())
+                self.assertNotIn("still render", stderr.getvalue())
+        finally:
+            server.DATABASE_URL = old_url
 
     def test_capture_failure_does_not_fail_tool(self):
         old_enabled, old_log = server.CAPTURE_ENABLED, server.LOG
