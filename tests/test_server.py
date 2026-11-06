@@ -136,6 +136,21 @@ class ProtocolTests(unittest.TestCase):
         self.assertIn("api.maxHeight", html)
         self.assertIn('data-scrollable="true"', html)
 
+    def test_legacy_widget_uris_serve_current_ui(self):
+        for version in range(1, 6):
+            uri = f"ui://widget/gpt-thinking-block-v{version}.html"
+            response = server.handle({
+                "jsonrpc": "2.0",
+                "id": 90 + version,
+                "method": "resources/read",
+                "params": {"uri": uri},
+            })
+            content = response["result"]["contents"][0]
+            self.assertEqual(content["uri"], uri)
+            self.assertEqual(content["mimeType"], server.WIDGET_MIME)
+            self.assertIn('ui/notifications/initialized', content["text"])
+            self.assertIn("gpt-thinking-block-v6.html", server.WIDGET_URI)
+
     def test_unknown_resource_returns_error(self):
         response = server.handle({
             "jsonrpc": "2.0",

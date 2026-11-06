@@ -28,6 +28,14 @@ BIND_HOST = os.environ.get("MCP_BIND", "127.0.0.1")
 
 PROTOCOL_FALLBACK = "2025-06-18"
 WIDGET_URI = "ui://widget/gpt-thinking-block-v6.html"
+LEGACY_WIDGET_URIS = frozenset({
+    "ui://widget/gpt-thinking-block-v1.html",
+    "ui://widget/gpt-thinking-block-v2.html",
+    "ui://widget/gpt-thinking-block-v3.html",
+    "ui://widget/gpt-thinking-block-v4.html",
+    "ui://widget/gpt-thinking-block-v5.html",
+})
+SUPPORTED_WIDGET_URIS = frozenset({WIDGET_URI, *LEGACY_WIDGET_URIS})
 WIDGET_MIME = "text/html;profile=mcp-app"
 
 
@@ -754,7 +762,7 @@ def handle(req):
         }]}}
     if method == "resources/read":
         uri = (req.get("params") or {}).get("uri")
-        if uri != WIDGET_URI:
+        if uri not in SUPPORTED_WIDGET_URIS:
             return {"jsonrpc": "2.0", "id": rid,
                     "error": {"code": -32002, "message": f"resource not found: {uri}"}}
         return {"jsonrpc": "2.0", "id": rid, "result": {"contents": [{
