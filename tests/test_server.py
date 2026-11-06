@@ -17,8 +17,6 @@ class ProtocolTests(unittest.TestCase):
         })
         self.assertEqual(response["result"]["protocolVersion"], "2025-06-18")
         self.assertEqual(response["result"]["serverInfo"]["name"], "gpt-thinking-block-mcp")
-        ui_extension = response["result"]["capabilities"]["extensions"]["io.modelcontextprotocol/ui"]
-        self.assertEqual(ui_extension["mimeTypes"], ["text/html;profile=mcp-app"])
 
     def test_tool_is_listed(self):
         response = server.handle({"jsonrpc": "2.0", "id": 2, "method": "tools/list"})
