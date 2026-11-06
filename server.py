@@ -726,7 +726,9 @@ def handle(req):
                 "tools": {"listChanged": False},
                 "resources": {"listChanged": False},
                 "extensions": {
-                    "io.modelcontextprotocol/ui": {},
+                    "io.modelcontextprotocol/ui": {
+                        "mimeTypes": [WIDGET_MIME],
+                    },
                 },
             },
             "serverInfo": {"name": "gpt-thinking-block-mcp", "version": "1.0.0"},
