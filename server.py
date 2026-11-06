@@ -27,7 +27,7 @@ CAPTURE_ENABLED = os.environ.get("CAPTURE_ENABLED", "0").lower() in {"1", "true"
 BIND_HOST = os.environ.get("MCP_BIND", "127.0.0.1")
 
 PROTOCOL_FALLBACK = "2025-06-18"
-WIDGET_URI = "ui://widget/gpt-thinking-block-v4.html"
+WIDGET_URI = "ui://widget/gpt-thinking-block-v5.html"
 WIDGET_MIME = "text/html;profile=mcp-app"
 
 
@@ -336,18 +336,133 @@ WIDGET_HTML = r"""<!doctype html>
     const card = document.getElementById("card");
     const toggle = document.getElementById("toggle");
     const content = document.getElementById("thinking-content");
+    const pendingRequests = new Map();
+    let rpcId = 0;
+    let mcpAppInitialized = false;
+    let hostContext = {};
     let heightFrame = 0;
     let lastMeasuredHeight = -1;
 
+    function rpcNotify(method, params = {}) {
+      window.parent.postMessage({ jsonrpc: "2.0", method, params }, "*");
+    }
+
+    function rpcRequest(method, params = {}) {
+      return new Promise((resolve, reject) => {
+        const id = ++rpcId;
+        pendingRequests.set(id, { resolve, reject });
+        window.parent.postMessage({ jsonrpc: "2.0", id, method, params }, "*");
+      });
+    }
+
+    function renderToolInput(params) {
+      render({ detail: { globals: { toolInput: params.arguments || {} } } });
+    }
+
+    function renderToolResult(params) {
+      render({
+        detail: {
+          globals: {
+            toolResponseMetadata: { mcp_tool_result: params || {} }
+          }
+        }
+      });
+    }
+
+    function handleHostMessage(event) {
+      if (event.source !== window.parent) return;
+      const message = event.data;
+      if (!message || message.jsonrpc !== "2.0") return;
+
+      if (Object.prototype.hasOwnProperty.call(message, "id")) {
+        const pending = pendingRequests.get(message.id);
+        if (pending) {
+          pendingRequests.delete(message.id);
+          if (message.error) {
+            pending.reject(new Error(message.error.message || "MCP Apps request failed"));
+          } else {
+            pending.resolve(message.result || {});
+          }
+          return;
+        }
+      }
+
+      if (message.method === "ui/resource-teardown" && message.id != null) {
+        window.parent.postMessage({ jsonrpc: "2.0", id: message.id, result: {} }, "*");
+        mcpAppInitialized = false;
+        return;
+      }
+
+      if (message.method === "ping" && message.id != null) {
+        window.parent.postMessage({ jsonrpc: "2.0", id: message.id, result: {} }, "*");
+        return;
+      }
+
+      if (typeof message.method !== "string") return;
+      const params = message.params || {};
+
+      switch (message.method) {
+        case "ui/notifications/tool-input":
+        case "ui/notifications/tool-input-partial":
+          renderToolInput(params);
+          break;
+        case "ui/notifications/tool-result":
+          renderToolResult(params);
+          break;
+        case "ui/notifications/host-context-changed":
+          hostContext = Object.assign({}, hostContext, params);
+          render({
+            detail: {
+              globals: {
+                theme: hostContext.theme,
+                maxHeight: hostContext.containerDimensions
+                  && hostContext.containerDimensions.maxHeight
+              }
+            }
+          });
+          break;
+      }
+    }
+
+    window.addEventListener("message", handleHostMessage, { passive: true });
+
+    async function initializeMcpApp() {
+      const result = await rpcRequest("ui/initialize", {
+        appInfo: { name: "gpt-thinking-block", version: "5.0.0" },
+        appCapabilities: {},
+        protocolVersion: "2026-01-26"
+      });
+      hostContext = result.hostContext || {};
+      mcpAppInitialized = true;
+      rpcNotify("ui/notifications/initialized", {});
+      render({
+        detail: {
+          globals: {
+            theme: hostContext.theme,
+            maxHeight: hostContext.containerDimensions
+              && hostContext.containerDimensions.maxHeight
+          }
+        }
+      });
+      requestIntrinsicHeight(true);
+    }
+
     function requestIntrinsicHeight(force = false) {
       const host = window.openai || {};
-      if (typeof host.notifyIntrinsicHeight !== "function") return;
       cancelAnimationFrame(heightFrame);
       heightFrame = requestAnimationFrame(() => {
         const measuredHeight = Math.ceil(document.documentElement.scrollHeight);
         if (!force && measuredHeight === lastMeasuredHeight) return;
         lastMeasuredHeight = measuredHeight;
-        try { host.notifyIntrinsicHeight(); } catch (_) {}
+        if (mcpAppInitialized) {
+          rpcNotify("ui/notifications/size-changed", {
+            width: Math.ceil(document.documentElement.scrollWidth),
+            height: measuredHeight
+          });
+        }
+        if (typeof host.notifyIntrinsicHeight === "function") {
+          try { host.notifyIntrinsicHeight(); } catch (_) {}
+        }
       });
     }
 
@@ -402,11 +517,15 @@ WIDGET_HTML = r"""<!doctype html>
       applyHostHeightLimit(api);
       requestIntrinsicHeight(true);
     }
+
     window.addEventListener("openai:set_globals", render);
     if (typeof ResizeObserver === "function") {
       new ResizeObserver(() => requestIntrinsicHeight()).observe(document.body);
     }
     render();
+    initializeMcpApp().catch((error) => {
+      console.error("Failed to initialize the MCP Apps bridge:", error);
+    });
   </script>
 </body>
 </html>"""
@@ -606,6 +725,9 @@ def handle(req):
             "capabilities": {
                 "tools": {"listChanged": False},
                 "resources": {"listChanged": False},
+                "extensions": {
+                    "io.modelcontextprotocol/ui": {},
+                },
             },
             "serverInfo": {"name": "gpt-thinking-block-mcp", "version": "1.0.0"},
         }}
