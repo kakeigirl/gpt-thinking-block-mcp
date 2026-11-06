@@ -26,7 +26,7 @@ class ProtocolTests(unittest.TestCase):
         self.assertIn("The user may see this block", tool["description"])
         self.assertIn("never include passwords, tokens, personal identifiers", tool["description"])
         self.assertIn("temporary work scoped to the current turn", tool["description"])
-        self.assertIn("normal user-facing final answer", tool["description"])
+        self.assertIn("normal user-facing answer", tool["description"])
         thinking_description = tool["inputSchema"]["properties"]["thinking"]["description"]
         self.assertIn("Use the user's main language", thinking_description)
         self.assertIn("style=relational", thinking_description)
