@@ -17,6 +17,7 @@ class ProtocolTests(unittest.TestCase):
         })
         self.assertEqual(response["result"]["protocolVersion"], "2025-06-18")
         self.assertEqual(response["result"]["serverInfo"]["name"], "gpt-thinking-block-mcp")
+        self.assertIn("io.modelcontextprotocol/ui", response["result"]["capabilities"]["extensions"])
 
     def test_tool_is_listed(self):
         response = server.handle({"jsonrpc": "2.0", "id": 2, "method": "tools/list"})
@@ -120,8 +121,10 @@ class ProtocolTests(unittest.TestCase):
         self.assertIn("#cbdbe1", html)
         self.assertIn('id="skin"', html)
         self.assertIn("SKIN ·", html)
-        self.assertIn("v5.html", server.WIDGET_URI)
+        self.assertIn("v6.html", server.WIDGET_URI)
         self.assertIn('ui/initialize', html)
+        self.assertIn('Start the MCP Apps handshake immediately', html)
+        self.assertLess(html.index('method: "ui/initialize"'), html.index('const card = document.getElementById("card")'))
         self.assertIn('ui/notifications/initialized', html)
         self.assertIn('ui/notifications/tool-input', html)
         self.assertIn('ui/notifications/tool-result', html)
